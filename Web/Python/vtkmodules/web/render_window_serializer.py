@@ -5,6 +5,9 @@ import json, time, re
 from vtk.vtkFiltersGeometry import vtkCompositeDataGeometryFilter
 from vtk.vtkCommonCore import vtkTypeUInt32Array
 from vtk.vtkWebCore import vtkWebApplication
+from vtk.numpy_interface import algorithms
+from vtk.numpy_interface import dataset_adapter as dsa
+import numpy as np
 
 from vtk.web import hashDataArray, getJSArrayType
 from vtk.web import buffer, base64Encode
@@ -208,14 +211,28 @@ def getRangeInfo(array, component):
   compRange = {}
   compRange['min'] = r[0]
   compRange['max'] = r[1]
-  compRange['component'] = array.GetComponentName(component)
+  componentName = array.GetComponentName(component)
+  compRange['component'] = component if not componentName else componentName
   return compRange
 
 # -----------------------------------------------------------------------------
 
-def getArrayDescription(array, context):
+def getArrayDescription(array, context, dataset):
   if not array:
     return None
+
+  if array.GetNumberOfComponents() == 9:
+    adapter = dsa.WrapDataObject(dataset)
+    name = array.GetName()
+    npArray = adapter.GetPointData().GetArray(name)
+    eigenvalues = algorithms.eigenvalue(npArray)
+    merge = np.column_stack((npArray, eigenvalues[:, np.newaxis, :]))
+    n = npArray.shape[0]
+    array.SetNumberOfComponents(12)
+    array.SetNumberOfTuples(n)
+
+    for i in range(n):
+      array.SetTypedTuple(i, merge[i].ravel())
 
   pMd5 = digest(array)
   context.cacheDataArray(pMd5, {
@@ -248,25 +265,28 @@ def extractRequiredFields(extractedFields, mapper, dataset, context, requestedFi
   if mapper.IsA('vtkMapper'):
     scalarVisibility = mapper.GetScalarVisibility()
     arrayAccessMode = mapper.GetArrayAccessMode()
-    colorArrayName = mapper.GetArrayName() if arrayAccessMode == 1 else mapper.GetArrayId()
     colorMode = mapper.GetColorMode()
     scalarMode = mapper.GetScalarMode()
-    if scalarVisibility and scalarMode == 3:
-      arrayMeta = getArrayDescription(dataset.GetPointData().GetArray(colorArrayName), context)
-      if arrayMeta:
-        arrayMeta['location'] = 'pointData';
-        extractedFields.append(arrayMeta)
-    if scalarVisibility and scalarMode == 4:
-      arrayMeta = getArrayDescription(dataset.GetCellData().GetArray(colorArrayName), context)
-      if arrayMeta:
-        arrayMeta['location'] = 'cellData';
-        extractedFields.append(arrayMeta)
+    pd = dataset.GetPointData()
+    
+    for index in range(pd.GetNumberOfArrays()):
+      colorArrayName = pd.GetArrayName(index)
+      if scalarVisibility and scalarMode == 3:
+        arrayMeta = getArrayDescription(pd.GetArray(colorArrayName), context, dataset)
+        if arrayMeta:
+          arrayMeta['location'] = 'pointData'
+          extractedFields.append(arrayMeta)
+      if scalarVisibility and scalarMode == 4:
+        arrayMeta = getArrayDescription(pd.GetArray(colorArrayName), context, dataset)
+        if arrayMeta:
+          arrayMeta['location'] = 'cellData'
+          extractedFields.append(arrayMeta)
 
   # Normal handling
   if 'Normals' in requestedFields:
     normals = dataset.GetPointData().GetNormals()
     if normals:
-      arrayMeta = getArrayDescription(normals, context)
+      arrayMeta = getArrayDescription(normals, context, dataset)
       if arrayMeta:
         arrayMeta['location'] = 'pointData'
         arrayMeta['registration'] = 'setNormals'
@@ -276,7 +296,7 @@ def extractRequiredFields(extractedFields, mapper, dataset, context, requestedFi
   if 'TCoords' in requestedFields:
     tcoords = dataset.GetPointData().GetTCoords()
     if tcoords:
-      arrayMeta = getArrayDescription(tcoords, context)
+      arrayMeta = getArrayDescription(tcoords, context, dataset)
       if arrayMeta:
         arrayMeta['location'] = 'pointData'
         arrayMeta['registration'] = 'setTCoords'
@@ -487,31 +507,31 @@ def polydataSerializer(parent, dataset, datasetId, context, depth):
     properties = {}
 
     # Points
-    points = getArrayDescription(dataset.GetPoints().GetData(), context)
+    points = getArrayDescription(dataset.GetPoints().GetData(), context, dataset)
     points['vtkClass'] = 'vtkPoints'
     properties['points'] = points
 
     ## Verts
     if dataset.GetVerts() and dataset.GetVerts().GetData().GetNumberOfTuples() > 0:
-      _verts = getArrayDescription(dataset.GetVerts().GetData(), context)
+      _verts = getArrayDescription(dataset.GetVerts().GetData(), context, dataset)
       properties['verts'] = _verts
       properties['verts']['vtkClass'] = 'vtkCellArray'
 
     ## Lines
     if dataset.GetLines() and dataset.GetLines().GetData().GetNumberOfTuples() > 0:
-      _lines = getArrayDescription(dataset.GetLines().GetData(), context)
+      _lines = getArrayDescription(dataset.GetLines().GetData(), context, dataset)
       properties['lines'] = _lines
       properties['lines']['vtkClass'] = 'vtkCellArray'
 
     ## Polys
     if dataset.GetPolys() and dataset.GetPolys().GetData().GetNumberOfTuples() > 0:
-      _polys = getArrayDescription(dataset.GetPolys().GetData(), context)
+      _polys = getArrayDescription(dataset.GetPolys().GetData(), context, dataset)
       properties['polys'] = _polys
       properties['polys']['vtkClass'] = 'vtkCellArray'
 
     ## Strips
     if dataset.GetStrips() and dataset.GetStrips().GetData().GetNumberOfTuples() > 0:
-      _strips = getArrayDescription(dataset.GetStrips().GetData(), context)
+      _strips = getArrayDescription(dataset.GetStrips().GetData(), context, dataset)
       properties['strips'] = _strips
       properties['strips']['vtkClass'] = 'vtkCellArray'
 
